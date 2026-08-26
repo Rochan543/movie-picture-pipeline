@@ -1,3 +1,8 @@
+## Project Repository
+
+GitHub Repository:
+https://github.com/Rochan543/movie-picture-pipeline
+
 ## Deployed Application
 
 The Movie Picture Pipeline application is deployed to Amazon EKS using GitHub Actions CI/CD pipelines.
