@@ -1,0 +1,149 @@
+name: Backend Continuous Deployment
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "starter/backend/**"
+      - ".github/workflows/backend-cd.yaml"
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  EKS_CLUSTER_NAME: cluster
+  ECR_REPOSITORY: backend
+
+jobs:
+  lint:
+    name: Lint Backend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pipenv
+          cache-dependency-path: starter/backend/Pipfile.lock
+
+      - name: Install Pipenv
+        run: pip install pipenv
+
+      - name: Install dependencies
+        working-directory: starter/backend
+        run: pipenv install --dev
+
+      - name: Run lint
+        working-directory: starter/backend
+        run: pipenv run lint
+
+  test:
+    name: Test Backend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pipenv
+          cache-dependency-path: starter/backend/Pipfile.lock
+
+      - name: Install Pipenv
+        run: pip install pipenv
+
+      - name: Install dependencies
+        working-directory: starter/backend
+        run: pipenv install --dev
+
+      - name: Run tests
+        working-directory: starter/backend
+        run: pipenv run test
+
+  build:
+    name: Build and Push Backend
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image name
+        id: image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: echo "image=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build backend Docker image
+        working-directory: starter/backend
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: docker build --tag "${IMAGE}" .
+
+      - name: Push backend image to ECR
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: docker push "${IMAGE}"
+
+  deploy:
+    name: Deploy Backend to EKS
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
+
+      - name: Install Kustomize
+        uses: imranismail/setup-kustomize@v2
+
+      - name: Deploy backend manifests
+        working-directory: starter/backend/k8s
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+        run: |
+          kustomize edit set image backend="${IMAGE}"
+          kustomize build | kubectl apply -f -
+
+      - name: Wait for backend rollout
+        run: kubectl rollout status deployment/backend --timeout=180s
+
+      - name: Show backend service
+        run: kubectl get service backend
+
+      - name: Report deployment failure
+        if: failure()
+        run: |
+          kubectl get pods -o wide || true
+          kubectl describe deployment backend || true

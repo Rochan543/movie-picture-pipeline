@@ -1,0 +1,11 @@
+# Terraform local/generated files
+**/.terraform/
+*.tfstate
+*.tfstate.*
+
+# Local Kubernetes helper files
+aws-auth.yaml
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
