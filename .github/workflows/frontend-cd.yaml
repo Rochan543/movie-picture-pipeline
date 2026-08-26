@@ -19,12 +19,23 @@ jobs:
   lint:
     name: Lint Frontend
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
           node-version-file: "starter/frontend/.nvmrc"
+
+      - name: Restore npm cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-frontend-npm-${{ hashFiles('starter/frontend/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-frontend-npm-
 
       - name: Install dependencies
         working-directory: starter/frontend
@@ -37,12 +48,23 @@ jobs:
   test:
     name: Test Frontend
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
           node-version-file: "starter/frontend/.nvmrc"
+
+      - name: Restore npm cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-frontend-npm-${{ hashFiles('starter/frontend/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-frontend-npm-
 
       - name: Install dependencies
         working-directory: starter/frontend
@@ -58,50 +80,55 @@ jobs:
     name: Build and Push Frontend
     runs-on: ubuntu-latest
     needs: [lint, test]
+
     outputs:
       image: ${{ steps.image.outputs.image }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Validate API URL
+      - name: Validate frontend API URL
         run: |
           if [ -z "${REACT_APP_MOVIE_API_URL}" ]; then
-            echo "REACT_APP_MOVIE_API_URL is not configured"
+            echo "REACT_APP_MOVIE_API_URL repository variable is not configured."
             exit 1
           fi
+
+          echo "Frontend API URL is configured."
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Set image
+      - name: Set image name
         id: image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        run: echo "image=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "image=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
-      - name: Build frontend
+      - name: Build frontend Docker image
         working-directory: starter/frontend
         env:
           IMAGE: ${{ steps.image.outputs.image }}
         run: |
           docker build \
             --build-arg REACT_APP_MOVIE_API_URL="${REACT_APP_MOVIE_API_URL}" \
-            -t "${IMAGE}" .
+            --tag "${IMAGE}" .
 
-      - name: Push frontend
+      - name: Push frontend image to ECR
         env:
           IMAGE: ${{ steps.image.outputs.image }}
-        run: docker push "${IMAGE}"
+        run: |
+          docker push "${IMAGE}"
 
   deploy:
     name: Deploy Frontend to EKS
@@ -109,18 +136,21 @@ jobs:
     needs: build
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Update kubeconfig
-        run: aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
+        run: |
+          aws eks update-kubeconfig \
+            --name "${EKS_CLUSTER_NAME}" \
+            --region "${AWS_REGION}"
 
       - name: Install Kustomize
         uses: imranismail/setup-kustomize@v2
@@ -130,13 +160,23 @@ jobs:
         env:
           IMAGE: ${{ needs.build.outputs.image }}
         run: |
+          echo "Deploying ${IMAGE}"
           kustomize edit set image frontend="${IMAGE}"
           kustomize build | kubectl apply -f -
 
-      - name: Wait for rollout
-        run: kubectl rollout status deployment/frontend --timeout=180s
+      - name: Wait for frontend rollout
+        run: |
+          kubectl rollout status deployment/frontend --timeout=180s
 
-      - name: Show status
+      - name: Show frontend status
         run: |
           kubectl get pods
           kubectl get service frontend
+          kubectl get deployment frontend -o jsonpath="{.spec.template.spec.containers[0].image}"
+          echo
+
+      - name: Report deployment failure
+        if: failure()
+        run: |
+          kubectl get pods -o wide || true
+          kubectl describe deployment frontend || true
